@@ -73,13 +73,42 @@ namespace SteamAuth
             postBody.Add("revocation_code", this.RevocationCode);
             postBody.Add("revocation_reason", "1");
             postBody.Add("steamguard_scheme", scheme.ToString());
-            string response = await SteamWeb.POSTRequest("https://api.steampowered.com/ITwoFactorService/RemoveAuthenticator/v1?access_token=" + this.Session.AccessToken, null, postBody);
+
+            string endpoint = "https://api.steampowered.com/ITwoFactorService/RemoveAuthenticator/v1?access_token=" + this.Session.AccessToken;
+            string response;
+            try
+            {
+                response = await SteamWeb.POSTRequest(endpoint, null, postBody);
+            }
+            catch (WebException ex) when (IsUnauthorized(ex) && this.Session != null && !this.Session.IsRefreshTokenExpired())
+            {
+                try
+                {
+                    await this.Session.RefreshAccessToken(allowRenewal: true);
+                }
+                catch (Exception refreshEx)
+                {
+                    throw new Exception("Failed to refresh session before deactivation retry: " + refreshEx.Message, refreshEx);
+                }
+
+                endpoint = "https://api.steampowered.com/ITwoFactorService/RemoveAuthenticator/v1?access_token=" + this.Session.AccessToken;
+                response = await SteamWeb.POSTRequest(endpoint, null, postBody);
+            }
+            catch (WebException ex) when (IsUnauthorized(ex))
+            {
+                throw new Exception("Steam rejected deactivation request (401 Unauthorized). Login again to refresh your session.", ex);
+            }
 
             // Parse to object
             var removeResponse = JsonConvert.DeserializeObject<RemoveAuthenticatorResponse>(response);
-
             if (removeResponse == null || removeResponse.Response == null || !removeResponse.Response.Success) return false;
             return true;
+        }
+
+        private static bool IsUnauthorized(WebException ex)
+        {
+            return ex.Response is HttpWebResponse response
+                && response.StatusCode == HttpStatusCode.Unauthorized;
         }
 
         public string GenerateSteamGuardCode()
@@ -149,16 +178,27 @@ namespace SteamAuth
 
         private Confirmation[] FetchConfirmationInternal(string response)
         {
-            var confirmationsResponse = JsonConvert.DeserializeObject<ConfirmationsResponse>(response);
+            if (string.IsNullOrWhiteSpace(response))
+                throw new Exception("Steam returned an empty confirmations response.");
 
-            if (confirmationsResponse == null || !confirmationsResponse.Success)
+            var confirmationsResponse = JsonConvert.DeserializeObject<ConfirmationsResponse>(response);
+            if (confirmationsResponse == null)
             {
-                throw new Exception(confirmationsResponse.Message);
+                string preview = response.Length > 200 ? response.Substring(0, 200) + "..." : response;
+                throw new Exception("Unexpected confirmations response from Steam: " + preview);
+            }
+
+            if (!confirmationsResponse.Success)
+            {
+                string msg = string.IsNullOrWhiteSpace(confirmationsResponse.Message)
+                    ? "Steam rejected the confirmations request."
+                    : confirmationsResponse.Message;
+                throw new Exception(msg);
             }
 
             if (confirmationsResponse.NeedAuthentication)
             {
-                throw new Exception("Needs Authentication");
+                throw new WGTokenExpiredException();
             }
 
             return confirmationsResponse.Confirmations;

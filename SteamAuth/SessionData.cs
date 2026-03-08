@@ -47,7 +47,11 @@ namespace SteamAuth
             }
 
             var response = JsonConvert.DeserializeObject<GenerateAccessTokenForAppResponse>(responseStr);
-            this.AccessToken = response.Response.AccessToken;
+            if (response?.Response == null)
+                throw new Exception("Failed to parse token refresh response.");
+
+            if (!string.IsNullOrEmpty(response.Response.AccessToken))
+                this.AccessToken = response.Response.AccessToken;
 
             if (!string.IsNullOrEmpty(response.Response.RefreshToken))
                 this.RefreshToken = response.Response.RefreshToken;
